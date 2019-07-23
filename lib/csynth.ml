@@ -55,6 +55,17 @@ module Component = struct
           | [i1; i2] -> Term.(magic i1 + magic i2 = magic out)
           | _ -> assert false) }
 
+  let mul id =
+    { name= "mul"
+    ; id
+    ; inputs= Type.[Wrapped.wrap Int; Wrapped.wrap Int]
+    ; output= Type.(Wrapped.wrap Int)
+    ; constr=
+        (fun ins out ->
+          match ins with
+          | [i1; i2] -> Term.(magic i1 * magic i2 = magic out)
+          | _ -> assert false) }
+
   let one id =
     { name= "one"
     ; id
@@ -226,7 +237,7 @@ let%expect_test "" =
           (fun ins out ->
             match ins with [x] -> Term.(magic x < magic out) | _ -> assert false) }
   in
-  solve 10 lib spec |> Or_error.ok_exn |> Program.to_string |> print_endline;
+  solve 10 lib spec |> Or_error.ok_exn |> Program.to_string |> print_endline ;
   [%expect {|
     x0 = one
     x1 = add i0 x0 |}]
@@ -243,7 +254,239 @@ let%expect_test "" =
             | [x] -> Term.(magic x * int 2 = magic out)
             | _ -> assert false) }
   in
-  solve 10 lib spec |> Or_error.ok_exn |> Program.to_string |> print_endline;
+  solve 10 lib spec |> Or_error.ok_exn |> Program.to_string |> print_endline ;
   [%expect {|
     x0 = one
     x1 = add i0 i0 |}]
+
+let matmul a b c =
+  let terms = ref [] in
+  for i = 0 to Array.length a - 1 do
+    for j = 0 to Array.length a - 1 do
+      for k = 0 to Array.length a - 1 do
+        let x = Term.(!(a.(i).(k)) * !(b.(k).(j))) in
+        let y = Term.(c.(i).(j) + x) in
+        terms := Term.simplify x :: Term.simplify y :: !terms ;
+        c.(i).(j) <- y
+      done
+    done
+  done ;
+  !terms
+
+let diag_symmetry s a =
+  for i = 0 to Array.length a - 1 do
+    for j = 1 to i - 1 do
+      Solver.add ~solver:s Term.(!(a.(i).(j)) = !(a.(j).(i)))
+    done
+  done
+
+let stripe_symmetry s a =
+  for i = 0 to Array.length a - 1 do
+    if i + 2 < Array.length a then
+      for j = 0 to Array.length a - 1 do
+        Solver.add ~solver:s Term.(!(a.(i).(j)) = !(a.(Int.(i + 2)).(j)))
+      done
+  done
+
+let vstripe_symmetry s a =
+  for i = 0 to Array.length a - 1 do
+    if i + 2 < Array.length a then
+      for j = 0 to Array.length a - 1 do
+        Solver.add ~solver:s Term.(!(a.(j).(i)) = !(a.(j).(Int.(i + 2))))
+      done
+  done
+
+let cboard_symmetry s a =
+  for i = 0 to Array.length a - 1 do
+    for j = 0 to Array.length a - 1 do
+      if i + 2 < Array.length a then
+        Solver.add ~solver:s Term.(!(a.(j).(i)) = !(a.(j).(Int.(i + 2)))) ;
+      if j + 2 < Array.length a then
+        Solver.add ~solver:s Term.(!(a.(j).(i)) = !(a.(Int.(j + 2)).(i)))
+    done
+  done
+
+let vars n name =
+  Array.init n ~f:(fun i ->
+      Array.init n ~f:(fun j ->
+          Symbol.declare Type.Int (sprintf "%s[%d,%d]" name i j)))
+
+let zeros n = Array.init n ~f:(fun _ -> Array.init n ~f:(fun _ -> Term.int 0))
+
+let rec equiv s = function
+  | [] -> []
+  | [x] -> [x]
+  | x :: xs ->
+      let xs = equiv s xs in
+      if
+        List.exists xs ~f:(fun x' ->
+            match Solver.check ~solver:s [Term.(x <> x')] with
+            | Unsat _ -> true
+            | Unknown _ -> false
+            | Sat _ -> false)
+      then xs
+      else x :: xs
+
+let equivalents s ts =
+  List.iteri ts ~f:(fun i t -> printf "Term %d: %s\n" i (Term.to_string t)) ;
+  let ts = equiv s ts in
+  List.iteri ts ~f:(fun i t -> printf "Class %d: %s\n" i (Term.to_string t))
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  let terms = matmul a b c in
+  let eterms = equiv solver terms in
+  printf "No symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| No symmetry: 0.833333 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  let terms = matmul a b c in
+  diag_symmetry solver a ;
+  let eterms = equiv solver terms in
+  printf "A diag symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| A diag symmetry: 0.833333 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  let terms = matmul a b c in
+  diag_symmetry solver b ;
+  let eterms = equiv solver terms in
+  printf "B diag symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| B diag symmetry: 0.833333 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  let terms = matmul a b c in
+  diag_symmetry solver a ;
+  diag_symmetry solver b ;
+  let eterms = equiv solver terms in
+  printf "AB diag symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| AB diag symmetry: 0.814815 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  stripe_symmetry solver a ;
+  let terms = matmul a b c in
+  let eterms = equiv solver terms in
+  printf "A stripe symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| A stripe symmetry: 0.555556 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  stripe_symmetry solver a ;
+  stripe_symmetry solver b ;
+  let terms = matmul a b c in
+  let eterms = equiv solver terms in
+  printf "AB stripe symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| AB stripe symmetry: 0.555556 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  stripe_symmetry solver b ;
+  let terms = matmul a b c in
+  let eterms = equiv solver terms in
+  printf "B stripe symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| B stripe symmetry: 0.833333 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  vstripe_symmetry solver a ;
+  let terms = matmul a b c in
+  let eterms = equiv solver terms in
+  printf "A vstripe symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| A vstripe symmetry: 0.833333 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  vstripe_symmetry solver b ;
+  let terms = matmul a b c in
+  let eterms = equiv solver terms in
+  printf "B vstripe symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| B vstripe symmetry: 0.555556 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  vstripe_symmetry solver a ;
+  vstripe_symmetry solver b ;
+  let terms = matmul a b c in
+  let eterms = equiv solver terms in
+  printf "AB vstripe symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| AB vstripe symmetry: 0.555556 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  stripe_symmetry solver a ;
+  vstripe_symmetry solver b ;
+  let terms = matmul a b c in
+  let eterms = equiv solver terms in
+  printf "A stripe B vstripe symmetry: %f"
+    Int.(List.length eterms // List.length terms);
+  [%expect {| A stripe B vstripe symmetry: 0.370370 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  cboard_symmetry solver a ;
+  let terms = matmul a b c in
+  let eterms = equiv solver terms in
+  printf "A cboard symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| A cboard symmetry: 0.555556 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  cboard_symmetry solver b ;
+  let terms = matmul a b c in
+  let eterms = equiv solver terms in
+  printf "B cboard symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| B cboard symmetry: 0.555556 |}]
+
+let%expect_test "" =
+  let solver = Solver.make () in
+  let a = vars 3 "a" in
+  let b = vars 3 "b" in
+  let c = zeros 3 in
+  cboard_symmetry solver a ;
+  cboard_symmetry solver b ;
+  let terms = matmul a b c in
+  let eterms = equiv solver terms in
+  printf "AB cboard symmetry: %f" Int.(List.length eterms // List.length terms);
+  [%expect {| AB cboard symmetry: 0.296296 |}]

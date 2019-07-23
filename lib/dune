@@ -1,6 +1,6 @@
 (library
  (public_name csynth)
- (libraries core z3 z3overlay logs expect_test_helpers_kernel)
+ (libraries core z3 z3overlay logs expect_test_helpers_kernel ocamlgraph)
  (inline_tests)
  (preprocess
   (pps ppx_sexp_conv ppx_compare ppx_hash ppx_expect ppx_let ppx_variants_conv))
